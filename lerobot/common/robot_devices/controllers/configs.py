@@ -18,9 +18,9 @@ class XboxControllerConfig(draccus.ChoiceRegistry):
     # Robot arm settings - Individual speeds for each axis
     shoulder_pan_speed: float = 0.025  # Base rotation speed
     x_axis_speed: float = 0.025  # Forward/backward movement speed
-    y_axis_speed: float = 0.025  # Up/down movement speed
-    wrist_flex_speed: float = 0.025  # Wrist up/down speed (was 0.25)
-    wrist_roll_speed: float = 0.025  # Wrist rotation speed (was 0.25)
+    y_axis_speed: float = 0.025   # Up/down movement speed
+    wrist_flex_speed: float = 0.025  # Wrist up/down speed
+    wrist_roll_speed: float = 0.025  # Wrist rotation speed
     gripper_speed: float = 0.03  # Gripper open/close speed
     
     # Robot arm settings
@@ -46,7 +46,7 @@ class XboxControllerConfig(draccus.ChoiceRegistry):
     
     # Safety limits for each motor and end-effector
     position_limits: Dict[str, Tuple[float, float]] = field(default_factory=lambda: {
-        "shoulder_pan": (-80, 80),
+        "shoulder_pan": (-70, 70),
         "shoulder_lift": (-5, 185),
         "elbow_flex": (-5, 185),
         "wrist_flex": (-110, 110),

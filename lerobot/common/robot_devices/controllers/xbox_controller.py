@@ -4,27 +4,23 @@ This module adapts the PS4 controller logic to work with Xbox controllers
 via pygame, providing the same functionality including simple inverse
 kinematics, macros, and safety validation.
 
-XBOX CONTROLLER SCHEME:
-=======================
+XBOX CONTROLLER SCHEME (Original PS4 Pattern):
+========================================
 🕹️ LEFT STICK: Mixed Control
    • X-axis: Base rotation (shoulder pan)
-   • Y-axis: Up/Down movement (Z-axis)
+   • Y-axis: Forward/Backward movement (X coordinate)
 
-🕹️ RIGHT STICK: Mixed Control
-   • X-axis: Forward/Backward movement
+🕹️ RIGHT STICK: Wrist Control
+   • X-axis: Wrist roll (rotation)
    • Y-axis: Wrist flex (up/down)
 
 🎯 TRIGGERS: Gripper Control
    • Left Trigger (LT): Open gripper
    • Right Trigger (RT): Close gripper
 
-🔘 SHOULDER BUTTONS: Wrist Rotation
-   • Left Bumper (LB): Rotate wrist left
-   • Right Bumper (RB): Rotate wrist right
-
-⬆️ D-PAD: Fine Adjustment (optional)
-   • Up/Down: Fine Y-axis adjustment (50% speed)
-   • Left/Right: Fine X-axis adjustment (50% speed)
+⬆️ D-PAD: Arm Position Control
+   • Up/Down: Up/Down movement (Y coordinate)
+   • Left/Right: Additional base rotation (shoulder pan)
 
 🔴 FACE BUTTONS: Preset Positions (Macros)
    • A: Home position
@@ -286,33 +282,30 @@ class XboxController:
                 break
         
         if not used_macros:
-            # Manual control mode - intuitive movement with both sticks
+            # Manual control mode - Original PS4 control pattern
             
-            # === LEFT STICK: MIXED CONTROL ===
-            # Left stick X controls shoulder_pan (base rotation) - SWITCHED!
-            temp_positions["shoulder_pan"] += axes["LX"] * self.config.shoulder_pan_speed
-            
-            # Left stick Y changes Y coordinate (up/down)
-            temp_y = self.y + axes["LY"] * self.config.y_axis_speed  # mm per update
-            
-            # === RIGHT STICK: MIXED CONTROL ===
-            # Right stick X controls forward/backward movement (X coordinate) - Left = Forward!
-            temp_x = self.x - axes["RX"] * self.config.x_axis_speed  # mm per update (REVERSED)
-            # Right stick Y controls wrist_flex (up/down)
+            # === RIGHT STICK: WRIST CONTROL ===
+            # Right stick controls wrist_roll (X) and wrist_flex (Y) - ORIGINAL PATTERN
+            temp_positions["wrist_roll"] += axes["RX"] * self.config.wrist_roll_speed
             temp_positions["wrist_flex"] -= axes["RY"] * self.config.wrist_flex_speed  # Inverted for intuitive control
-            
-            # === SHOULDER BUTTONS: WRIST ROTATION ===
-            # Left/Right bumpers control wrist_roll - SWITCHED!
-            temp_positions["wrist_roll"] += (buttons["RB"] - buttons["LB"]) * self.config.wrist_roll_speed
             
             # === TRIGGERS: GRIPPER ===
             temp_positions["gripper"] -= self.config.gripper_speed * axes["RT"]  # Right trigger closes
             temp_positions["gripper"] += self.config.gripper_speed * axes["LT"]  # Left trigger opens
             
-            # === D-PAD: FINE ARM POSITION ADJUSTMENT ===
-            # D-pad controls fine adjustment of arm position (not wrist)
-            temp_x += (buttons["DPAD_LEFT"] - buttons["DPAD_RIGHT"]) * self.config.x_axis_speed * 0.5  # Fine X control
-            temp_y += (buttons["DPAD_UP"] - buttons["DPAD_DOWN"]) * self.config.y_axis_speed * 0.5  # Fine Y control
+            # === LEFT STICK X + D-PAD LEFT/RIGHT: SHOULDER PAN ===
+            # Left stick X and D-pad left/right control shoulder_pan - ORIGINAL PATTERN
+            temp_positions["shoulder_pan"] += (
+                axes["LX"] - buttons["DPAD_LEFT"] + buttons["DPAD_RIGHT"]
+            ) * self.config.shoulder_pan_speed
+            
+            # === LEFT STICK Y: FORWARD/BACKWARD (X coordinate) ===
+            # Left stick Y changes X coordinate - ORIGINAL PATTERN
+            temp_x = self.x + axes["LY"] * self.config.x_axis_speed  # mm per update
+            
+            # === D-PAD UP/DOWN: UP/DOWN MOVEMENT (Y coordinate) ===
+            # D-pad up/down changes Y coordinate - ORIGINAL PATTERN
+            temp_y = self.y + (buttons["DPAD_UP"] - buttons["DPAD_DOWN"]) * self.config.y_axis_speed
             
             # Compute shoulder_lift and elbow_flex angles using inverse kinematics
             try:
