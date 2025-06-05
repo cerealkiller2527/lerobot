@@ -12,15 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+"""Control configurations for robot operations."""
+
 from dataclasses import dataclass
 from pathlib import Path
 
 import draccus
 
-from lerobot.common.robot_devices.robots.configs import RobotConfig
 from lerobot.common.robot_devices.controllers.configs import XboxControllerConfig
-from lerobot.configs import parser
+from lerobot.common.robot_devices.robots.configs import RobotConfig
 from lerobot.configs.policies import PreTrainedConfig
+from lerobot.configs import parser
 
 
 @dataclass
@@ -43,22 +45,10 @@ class TeleoperateControlConfig(ControlConfig):
     teleop_time_s: float | None = None
     # Display all cameras on screen
     display_data: bool = False
-
-
-@ControlConfig.register_subclass("xbox_teleoperate")
-@dataclass
-class XboxTeleoperateControlConfig(ControlConfig):
-    # Xbox controller configuration
-    xbox_controller: XboxControllerConfig = XboxControllerConfig()
-    # Limit the maximum frames per second. By default, no limit.
-    fps: int | None = None
-    teleop_time_s: float | None = None
-    # Display all cameras on screen
-    display_data: bool = False
-    # Which arm to control (e.g., "main", "left", "right")
-    target_arm: str = "main"
-    # Enable/disable Xbox controller teleoperation
-    enable_xbox: bool = True
+    
+    # Xbox integration - single source of truth from controllers/configs.py
+    xbox_controller: XboxControllerConfig | None = None
+    xbox_target_arm: str = "main"
 
 
 @ControlConfig.register_subclass("record")
@@ -104,6 +94,10 @@ class RecordControlConfig(ControlConfig):
     play_sounds: bool = True
     # Resume recording on an existing dataset.
     resume: bool = False
+    
+    # Xbox integration - single source of truth from controllers/configs.py
+    xbox_controller: XboxControllerConfig | None = None
+    xbox_target_arm: str = "main"
 
     def __post_init__(self):
         # HACK: We parse again the cli args here to get the pretrained path if there was one.
@@ -112,17 +106,6 @@ class RecordControlConfig(ControlConfig):
             cli_overrides = parser.get_cli_overrides("control.policy")
             self.policy = PreTrainedConfig.from_pretrained(policy_path, cli_overrides=cli_overrides)
             self.policy.pretrained_path = policy_path
-
-
-@ControlConfig.register_subclass("xbox_record")
-@dataclass
-class XboxRecordControlConfig(RecordControlConfig):
-    # Xbox controller configuration for recording datasets
-    xbox_controller: XboxControllerConfig = XboxControllerConfig()
-    # Which arm to control (e.g., "main", "left", "right")
-    target_arm: str = "main"
-    # Enable/disable Xbox controller teleoperation during recording
-    enable_xbox: bool = True
 
 
 @ControlConfig.register_subclass("replay")

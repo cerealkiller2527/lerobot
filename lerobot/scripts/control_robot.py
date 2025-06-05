@@ -154,8 +154,6 @@ from lerobot.common.robot_devices.control_configs import (
     RemoteRobotConfig,
     ReplayControlConfig,
     TeleoperateControlConfig,
-    XboxTeleoperateControlConfig,
-    XboxRecordControlConfig,
 )
 from lerobot.common.robot_devices.control_utils import (
     control_loop,
@@ -170,7 +168,6 @@ from lerobot.common.robot_devices.control_utils import (
     warmup_record,
 )
 from lerobot.common.robot_devices.robots.utils import Robot, make_robot_from_config
-from lerobot.common.robot_devices.robots.xbox_manipulator import XboxManipulatorRobot
 from lerobot.common.robot_devices.utils import busy_wait, safe_disconnect
 from lerobot.common.utils.utils import has_method, init_logging, log_say
 from lerobot.configs import parser
@@ -236,6 +233,14 @@ def calibrate(robot: Robot, cfg: CalibrateControlConfig):
 
 @safe_disconnect
 def teleoperate(robot: Robot, cfg: TeleoperateControlConfig):
+    """Enhanced teleoperate function with optional Xbox support."""
+    
+    # NEW: Check for Xbox integration
+    if _has_xbox_config(cfg):
+        _log_xbox_status(cfg)
+        robot = _wrap_with_xbox_if_needed(robot, cfg)
+    
+    # EXISTING: Use existing control_loop (unchanged)
     control_loop(
         robot,
         control_time_s=cfg.teleop_time_s,
@@ -246,145 +251,18 @@ def teleoperate(robot: Robot, cfg: TeleoperateControlConfig):
 
 
 @safe_disconnect
-def xbox_teleoperate(robot: Robot, cfg: XboxTeleoperateControlConfig):
-    """Xbox controller teleoperation."""
-    if not cfg.enable_xbox:
-        # Fall back to regular teleoperation if Xbox is disabled
-        regular_cfg = TeleoperateControlConfig(
-            fps=cfg.fps,
-            teleop_time_s=cfg.teleop_time_s,
-            display_data=cfg.display_data
-        )
-        return teleoperate(robot, regular_cfg)
-    
-    print(f"Starting Xbox controller teleoperation for arm: {cfg.target_arm}")
-    print("Use Xbox controller to control the robot arm.")
-    print("Press Ctrl+C to stop.")
-    
-    # For robots without leader arms, use direct Xbox control
-    xbox_control_loop(
-        robot,
-        cfg.xbox_controller,
-        cfg.target_arm,
-        control_time_s=cfg.teleop_time_s,
-        fps=cfg.fps,
-        display_data=cfg.display_data,
-    )
-
-
-def xbox_control_loop(
-    robot,
-    xbox_controller_config,
-    target_arm,
-    control_time_s=None,
-    fps=None,
-    display_data=False,
-):
-    """Direct Xbox controller control loop for robots without leader arms."""
-    from lerobot.common.robot_devices.controllers.xbox_controller import XboxController
-    
-    # Initialize Xbox controller
-    xbox_controller = XboxController(xbox_controller_config)
-    if not xbox_controller.connect():
-        raise ConnectionError("Failed to connect Xbox controller")
-    
-    # Connect robot
-    if not robot.is_connected:
-        robot.connect()
-    
-    # Get target arm
-    if target_arm not in robot.follower_arms:
-        available_arms = list(robot.follower_arms.keys())
-        raise ValueError(f"Target arm '{target_arm}' not found. Available arms: {available_arms}")
-    
-    target_robot_arm = robot.follower_arms[target_arm]
-    
-    try:
-        if control_time_s is None:
-            control_time_s = float("inf")
-        
-        start_time = time.perf_counter()
-        
-        while (time.perf_counter() - start_time) < control_time_s:
-            loop_start = time.perf_counter()
-            
-            # Update Xbox controller
-            xbox_controller.update()
-            
-            # Get motor positions from Xbox controller
-            xbox_positions = xbox_controller.get_command()
-            
-            # Send positions to robot arm
-            if xbox_positions:
-                # Convert to the format expected by the robot
-                motor_positions = []
-                for motor_name in target_robot_arm.motor_names:
-                    if motor_name in xbox_positions:
-                        motor_positions.append(xbox_positions[motor_name])
-                    else:
-                        # Use current position for uncontrolled motors
-                        current_pos = target_robot_arm.read("Present_Position")
-                        motor_idx = list(target_robot_arm.motor_names).index(motor_name)
-                        motor_positions.append(current_pos[motor_idx])
-                
-                # Send goal positions to robot
-                goal_pos = np.array(motor_positions, dtype=np.float32)
-                target_robot_arm.write("Goal_Position", goal_pos)
-            
-            # Handle FPS limiting
-            if fps is not None:
-                loop_time = time.perf_counter() - loop_start
-                target_loop_time = 1.0 / fps
-                if loop_time < target_loop_time:
-                    time.sleep(target_loop_time - loop_time)
-    
-    except KeyboardInterrupt:
-        print("\nXbox controller teleoperation stopped by user")
-    finally:
-        xbox_controller.disconnect()
-        print("Xbox controller disconnected")
-
-
-@safe_disconnect
-def xbox_record(robot: Robot, cfg: XboxRecordControlConfig) -> LeRobotDataset:
-    """Xbox controller recording."""
-    if not cfg.enable_xbox:
-        # Fall back to regular recording if Xbox is disabled
-        regular_cfg = RecordControlConfig(**{
-            k: v for k, v in cfg.__dict__.items() 
-            if k not in ['xbox_controller', 'target_arm', 'enable_xbox']
-        })
-        return record(robot, regular_cfg)
-    
-    # Create Xbox manipulator robot wrapper
-    if not isinstance(robot, XboxManipulatorRobot):
-        # Wrap existing robot with Xbox controller
-        xbox_robot = XboxManipulatorRobot(
-            config=robot.config,
-            xbox_controller_config=cfg.xbox_controller,
-            target_arm=cfg.target_arm
-        )
-        # Transfer any existing connections
-        if robot.is_connected:
-            robot.disconnect()
-        xbox_robot.follower_arms = robot.follower_arms
-        xbox_robot.leader_arms = robot.leader_arms
-        xbox_robot.cameras = robot.cameras
-        robot = xbox_robot
-    
-    print(f"Starting Xbox controller recording for arm: {cfg.target_arm}")
-    print("Use Xbox controller to control and record robot arm movements.")
-    
-    # Use the regular record function with the Xbox robot
-    return record(robot, cfg)
-
-
-@safe_disconnect
 def record(
     robot: Robot,
     cfg: RecordControlConfig,
 ) -> LeRobotDataset:
-    # TODO(rcadene): Add option to record logs
+    """Enhanced record function with optional Xbox support."""
+    
+    # NEW: Check for Xbox integration
+    if _has_xbox_config(cfg):
+        _log_xbox_status(cfg)
+        robot = _wrap_with_xbox_if_needed(robot, cfg)
+    
+    # EXISTING: Use all existing record logic (unchanged)
     if cfg.resume:
         dataset = LeRobotDataset(
             cfg.repo_id,
@@ -554,15 +432,9 @@ def control_robot(cfg: ControlPipelineConfig):
     elif isinstance(cfg.control, TeleoperateControlConfig):
         _init_rerun(control_config=cfg.control, session_name="lerobot_control_loop_teleop")
         teleoperate(robot, cfg.control)
-    elif isinstance(cfg.control, XboxTeleoperateControlConfig):
-        _init_rerun(control_config=cfg.control, session_name="lerobot_control_loop_xbox_teleop")
-        xbox_teleoperate(robot, cfg.control)
     elif isinstance(cfg.control, RecordControlConfig):
         _init_rerun(control_config=cfg.control, session_name="lerobot_control_loop_record")
         record(robot, cfg.control)
-    elif isinstance(cfg.control, XboxRecordControlConfig):
-        _init_rerun(control_config=cfg.control, session_name="lerobot_control_loop_xbox_record")
-        xbox_record(robot, cfg.control)
     elif isinstance(cfg.control, ReplayControlConfig):
         replay(robot, cfg.control)
     elif isinstance(cfg.control, RemoteRobotConfig):
@@ -575,6 +447,61 @@ def control_robot(cfg: ControlPipelineConfig):
         # Disconnect manually to avoid a "Core dump" during process
         # termination due to camera threads not properly exiting.
         robot.disconnect()
+
+
+def _wrap_with_xbox_if_needed(robot: Robot, cfg) -> Robot:
+    """Helper to optionally wrap robot with Xbox functionality."""
+    if cfg.xbox_controller is not None:
+        from lerobot.common.robot_devices.robots.manipulator import ManipulatorRobot
+        
+        if isinstance(robot, ManipulatorRobot):
+            target_arm = getattr(cfg, 'xbox_target_arm', 'main')
+            
+            logging.info(f"Enabling Xbox controller for arm: {target_arm}")
+            
+            # Create new robot instance with Xbox controller
+            xbox_robot = ManipulatorRobot(
+                robot.config, 
+                xbox_controller_config=cfg.xbox_controller,
+                xbox_target_arm=target_arm
+            )
+            
+            # Transfer existing state if robot was connected
+            if robot.is_connected:
+                robot.disconnect()
+            
+            return xbox_robot
+    
+    return robot  # Return unchanged if no Xbox needed
+
+
+def _create_xbox_controllers(cfg) -> dict[str, "XboxController"]:
+    """Helper to create multiple Xbox controllers for multi-arm setups."""
+    from lerobot.common.robot_devices.controllers.xbox_controller import XboxController
+    
+    controllers = {}
+    if cfg.xbox_controller is not None:
+        target_arm = getattr(cfg, 'xbox_target_arm', 'main')
+        controllers[target_arm] = XboxController(cfg.xbox_controller)
+        logging.info(f"Created Xbox controller for arm: {target_arm}")
+    
+    return controllers
+
+
+def _has_xbox_config(cfg) -> bool:
+    """Check if configuration has Xbox settings."""
+    return cfg.xbox_controller is not None
+
+
+def _log_xbox_status(cfg) -> None:
+    """Log Xbox controller configuration status."""
+    if _has_xbox_config(cfg):
+        target_arm = getattr(cfg, 'xbox_target_arm', 'main')
+        device_index = cfg.xbox_controller.device_index
+        logging.info(f"Xbox controller enabled for arm: {target_arm}")
+        logging.info(f"Xbox device index: {device_index}")
+    else:
+        logging.info("Using standard leader arm teleoperation")
 
 
 if __name__ == "__main__":

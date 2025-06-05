@@ -157,6 +157,8 @@ class ManipulatorRobot:
     def __init__(
         self,
         config: ManipulatorRobotConfig,
+        xbox_controller_config: "XboxControllerConfig" = None,
+        xbox_target_arm: str = "main",
     ):
         self.config = config
         self.robot_type = self.config.type
@@ -166,6 +168,16 @@ class ManipulatorRobot:
         self.cameras = make_cameras_from_configs(self.config.cameras)
         self.is_connected = False
         self.logs = {}
+        
+        # Xbox controller integration
+        self.xbox_controller = None
+        self.xbox_target_arm = xbox_target_arm
+        self.xbox_enabled = False
+        
+        if xbox_controller_config is not None:
+            from lerobot.common.robot_devices.controllers.xbox_controller import XboxController
+            self.xbox_controller = XboxController(xbox_controller_config)
+            self.xbox_enabled = True
 
     def get_motor_names(self, arm: dict[str, MotorsBus]) -> list:
         return [f"{arm}_{motor}" for arm, bus in arm.items() for motor in bus.motors]
@@ -288,6 +300,13 @@ class ManipulatorRobot:
         # Connect the cameras
         for name in self.cameras:
             self.cameras[name].connect()
+
+        # Connect Xbox controller if enabled
+        if self.xbox_enabled and self.xbox_controller:
+            logging.info(f"Connecting Xbox controller for arm: {self.xbox_target_arm}")
+            if not self.xbox_controller.connect():
+                logging.warning("Failed to connect Xbox controller, falling back to leader arm control")
+                self.xbox_enabled = False
 
         self.is_connected = True
 
@@ -450,6 +469,14 @@ class ManipulatorRobot:
                 "ManipulatorRobot is not connected. You need to run `robot.connect()`."
             )
 
+        # Use Xbox controller if enabled, otherwise use leader arms
+        if self.xbox_enabled and self.xbox_controller:
+            return self._xbox_teleop_step(record_data)
+        else:
+            return self._leader_teleop_step(record_data)
+
+    def _leader_teleop_step(self, record_data=False):
+        """Original leader arm teleoperation logic."""
         # Prepare to assign the position of the leader to the follower
         leader_pos = {}
         for name in self.leader_arms:
@@ -522,6 +549,119 @@ class ManipulatorRobot:
             obs_dict[f"observation.images.{name}"] = images[name]
 
         return obs_dict, action_dict
+
+    def _xbox_teleop_step(self, record_data=False):
+        """Xbox controller teleoperation with mixed control support."""
+        # Update Xbox controller state
+        if not self.xbox_controller.update():
+            logging.warning("Xbox controller update failed, falling back to leader arms")
+            self.xbox_enabled = False
+            return self._leader_teleop_step(record_data)
+        
+        # Get Xbox controller commands
+        xbox_commands = self.xbox_controller.get_command()
+        
+        # Convert Xbox commands to robot actions for target arm
+        xbox_leader_pos = self._convert_xbox_to_robot_actions(xbox_commands)
+        
+        # Get leader arm positions for non-target arms (MIXED CONTROL)
+        leader_pos = {}
+        for name in self.leader_arms:
+            if name != self.xbox_target_arm:  # Use leader arms for non-target arms
+                before_lread_t = time.perf_counter()
+                leader_pos[name] = self.leader_arms[name].read("Present_Position")
+                leader_pos[name] = torch.from_numpy(leader_pos[name])
+                self.logs[f"read_leader_{name}_pos_dt_s"] = time.perf_counter() - before_lread_t
+        
+        # Combine Xbox and leader positions
+        all_leader_pos = {**xbox_leader_pos, **leader_pos}
+        
+        # Send commands to follower arms
+        follower_goal_pos = {}
+        for name in self.follower_arms:
+            if name in all_leader_pos:
+                before_fwrite_t = time.perf_counter()
+                goal_pos = all_leader_pos[name]
+                
+                # Apply safety limits if configured
+                if self.config.max_relative_target is not None:
+                    present_pos = self.follower_arms[name].read("Present_Position")
+                    present_pos = torch.from_numpy(present_pos)
+                    goal_pos = ensure_safe_goal_position(goal_pos, present_pos, self.config.max_relative_target)
+                
+                follower_goal_pos[name] = goal_pos
+                goal_pos_np = goal_pos.numpy().astype(np.float32)
+                self.follower_arms[name].write("Goal_Position", goal_pos_np)
+                self.logs[f"write_follower_{name}_goal_pos_dt_s"] = time.perf_counter() - before_fwrite_t
+
+        # Early exit when recording data is not requested
+        if not record_data:
+            return
+
+        # Read follower positions for recording (ALL arms)
+        follower_pos = {}
+        for name in self.follower_arms:
+            before_fread_t = time.perf_counter()
+            follower_pos[name] = self.follower_arms[name].read("Present_Position")
+            follower_pos[name] = torch.from_numpy(follower_pos[name])
+            self.logs[f"read_follower_{name}_pos_dt_s"] = time.perf_counter() - before_fread_t
+
+        # Create state by concatenating follower current position
+        state = []
+        for name in self.follower_arms:
+            if name in follower_pos:
+                state.append(follower_pos[name])
+        state = torch.cat(state)
+
+        # Create action by concatenating follower goal position
+        action = []
+        for name in self.follower_arms:
+            if name in follower_goal_pos:
+                action.append(follower_goal_pos[name])
+        action = torch.cat(action)
+
+        # Capture images from cameras
+        images = {}
+        for name in self.cameras:
+            before_camread_t = time.perf_counter()
+            images[name] = self.cameras[name].async_read()
+            images[name] = torch.from_numpy(images[name])
+            self.logs[f"read_camera_{name}_dt_s"] = self.cameras[name].logs["delta_timestamp_s"]
+            self.logs[f"async_read_camera_{name}_dt_s"] = time.perf_counter() - before_camread_t
+
+        # Populate output dictionaries
+        obs_dict, action_dict = {}, {}
+        obs_dict["observation.state"] = state
+        action_dict["action"] = action
+        for name in self.cameras:
+            obs_dict[f"observation.images.{name}"] = images[name]
+
+        return obs_dict, action_dict
+
+    def _convert_xbox_to_robot_actions(self, xbox_commands):
+        """Convert Xbox controller commands to robot motor positions."""
+        if self.xbox_target_arm not in self.follower_arms:
+            logging.warning(f"Target arm '{self.xbox_target_arm}' not found in follower arms")
+            return {}
+        
+        target_robot_arm = self.follower_arms[self.xbox_target_arm]
+        motor_positions = []
+        
+        # Map Xbox commands to motor positions based on motor names
+        for motor_name in target_robot_arm.motor_names:
+            if motor_name in xbox_commands:
+                motor_positions.append(xbox_commands[motor_name])
+            else:
+                # Use current position for unmapped motors
+                try:
+                    current_pos = target_robot_arm.read("Present_Position")
+                    motor_idx = list(target_robot_arm.motor_names).index(motor_name)
+                    motor_positions.append(current_pos[motor_idx])
+                except (ValueError, IndexError):
+                    motor_positions.append(0.0)  # Safe fallback
+
+        # Return in expected format
+        return {self.xbox_target_arm: torch.tensor(motor_positions, dtype=torch.float32)}
 
     def capture_observation(self):
         """The returned observations do not have a batch dimension."""
@@ -619,6 +759,10 @@ class ManipulatorRobot:
 
         for name in self.cameras:
             self.cameras[name].disconnect()
+
+        # Disconnect Xbox controller if connected
+        if self.xbox_controller:
+            self.xbox_controller.disconnect()
 
         self.is_connected = False
 

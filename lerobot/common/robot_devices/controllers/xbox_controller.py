@@ -1,39 +1,17 @@
-"""Xbox controller teleoperation using pygame for input handling.
+"""Xbox controller teleoperation for robot arms.
 
-This module adapts the PS4 controller logic to work with Xbox controllers
-via pygame, providing the same functionality including simple inverse
-kinematics, macros, and safety validation.
-
-XBOX CONTROLLER SCHEME (Original PS4 Pattern):
-========================================
-🕹️ LEFT STICK: Mixed Control
-   • X-axis: Base rotation (shoulder pan)
-   • Y-axis: Forward/Backward movement (X coordinate)
-
-🕹️ RIGHT STICK: Wrist Control
-   • X-axis: Wrist roll (rotation)
-   • Y-axis: Wrist flex (up/down)
-
-🎯 TRIGGERS: Gripper Control
-   • Left Trigger (LT): Open gripper
-   • Right Trigger (RT): Close gripper
-
-⬆️ D-PAD: Arm Position Control
-   • Up/Down: Up/Down movement (Y coordinate)
-   • Left/Right: Additional base rotation (shoulder pan)
-
-🔴 FACE BUTTONS: Preset Positions (Macros)
-   • A: Home position
-   • B: Reach forward  
-   • X: Pick position
-   • Y: Place position
+Controller mapping:
+- Left stick: Base rotation (X) + Forward/backward (Y)  
+- Right stick: Wrist roll (X) + Wrist flex (Y)
+- Triggers: Gripper control (LT=open, RT=close)
+- D-pad: Up/down movement + additional base rotation
+- Face buttons: Preset positions (A=home, B=reach, X=pick, Y=place)
 """
 
 import copy
 import logging
 import math
-import time
-from typing import Dict, Any
+from typing import Dict
 
 import pygame
 
@@ -41,68 +19,43 @@ from lerobot.common.robot_devices.controllers.configs import XboxControllerConfi
 
 
 class XboxController:
-    """Xbox controller for robot arm teleoperation.
-    
-    Provides the same functionality as the PS4 controller but uses pygame
-    for input handling instead of the HID library. Includes simple 2-link
-    inverse kinematics, macro commands, and safety validation.
-    
-    Note: This controller requires regular calls to update() from the main thread
-    to process pygame events and controller input.
-    """
+    """Xbox controller for robot arm teleoperation with 2-link kinematics."""
     
     def __init__(self, config: XboxControllerConfig):
-        """Initialize Xbox controller with configuration.
-        
-        Args:
-            config: XboxControllerConfig with all settings
-        """
+        """Initialize Xbox controller."""
         self.config = config
         
-        # Motor and position state (from PS4 code)
+        # Motor state
         self.motor_names = config.motor_names
         self.current_positions = dict(zip(self.motor_names, config.initial_position, strict=False))
         self.new_positions = self.current_positions.copy()
         
-        # Simple kinematics parameters (from PS4 code)
-        self.l1 = config.l1  # First arm segment length (mm)
-        self.l2 = config.l2  # Second arm segment length (mm)
-        
-        # Current end-effector position in mm
+        # Kinematics
+        self.l1 = config.l1
+        self.l2 = config.l2
         self.x, self.y = self._compute_position(
             self.current_positions["shoulder_lift"], 
             self.current_positions["elbow_flex"]
         )
         
-        # Controller state tracking
+        # Controller state
         self.axes = {
-            "LX": 0.0,  # Left stick X
-            "LY": 0.0,  # Left stick Y
-            "RX": 0.0,  # Right stick X
-            "RY": 0.0,  # Right stick Y
-            "LT": 0.0,  # Left trigger (0.0 to 1.0)
-            "RT": 0.0,  # Right trigger (0.0 to 1.0)
+            "LX": 0.0, "LY": 0.0, "RX": 0.0, "RY": 0.0, "LT": 0.0, "RT": 0.0,
         }
         
         self.buttons = {
-            "A": 0, "B": 0, "X": 0, "Y": 0,
-            "LB": 0, "RB": 0,  # Left/Right bumpers
-            "BACK": 0, "START": 0,
-            "LS": 0, "RS": 0,  # Left/Right stick buttons
-            "DPAD_UP": 0, "DPAD_DOWN": 0, 
-            "DPAD_LEFT": 0, "DPAD_RIGHT": 0,
+            "A": 0, "B": 0, "X": 0, "Y": 0, "LB": 0, "RB": 0,
+            "BACK": 0, "START": 0, "LS": 0, "RS": 0,
+            "DPAD_UP": 0, "DPAD_DOWN": 0, "DPAD_LEFT": 0, "DPAD_RIGHT": 0,
         }
         
         self.previous_buttons = self.buttons.copy()
         
-        # Pygame joystick objects
+        # Connection
         self.joystick = None
         self.device_index = config.device_index
-        
-        # Connection state
         self.connected = False
         
-        # Initialize pygame and connect
         self._init_pygame()
         self.connect()
     
@@ -111,16 +64,11 @@ class XboxController:
         try:
             pygame.init()
             pygame.joystick.init()
-            logging.info(f"Pygame initialized. Found {pygame.joystick.get_count()} joystick(s)")
         except Exception as e:
             logging.error(f"Failed to initialize pygame: {e}")
     
     def connect(self) -> bool:
-        """Connect to Xbox controller.
-        
-        Returns:
-            bool: True if connection successful, False otherwise
-        """
+        """Connect to Xbox controller."""
         try:
             joystick_count = pygame.joystick.get_count()
             if joystick_count == 0:
@@ -135,8 +83,6 @@ class XboxController:
             self.joystick.init()
             
             logging.info(f"Connected to controller: {self.joystick.get_name()}")
-            logging.info(f"Axes: {self.joystick.get_numaxes()}, Buttons: {self.joystick.get_numbuttons()}")
-            
             self.connected = True
             return True
             
@@ -152,41 +98,23 @@ class XboxController:
         if self.joystick:
             try:
                 self.joystick.quit()
-                logging.info("Xbox controller disconnected")
             except Exception as e:
                 logging.error(f"Error disconnecting controller: {e}")
             finally:
                 self.joystick = None
     
     def is_connected(self) -> bool:
-        """Check if controller is connected.
-        
-        Returns:
-            bool: True if connected
-        """
+        """Check if controller is connected."""
         return self.joystick is not None and self.connected
     
     def update(self):
-        """Update controller state and process input.
-        
-        This method should be called regularly from the main thread to:
-        1. Process pygame events
-        2. Read controller input
-        3. Update robot positions
-        
-        Returns:
-            bool: True if update was successful, False if controller disconnected
-        """
+        """Update controller state and process input."""
         if not self.is_connected():
             return False
             
         try:
-            # Process pygame events (required for joystick state updates)
             pygame.event.pump()
-            
-            # Read and process controller input
             self._read_controller_state()
-            
             return True
             
         except Exception as e:
@@ -243,31 +171,15 @@ class XboxController:
         self._update_positions(self.axes, self.buttons)
     
     def _filter_deadzone(self, value: float, threshold: float = 0.1) -> float:
-        """Apply deadzone filter to controller input to avoid drift.
-        
-        Simple approach copied from PS4 controller - just zero out values below threshold.
-        
-        Args:
-            value: Raw controller input (-1.0 to 1.0)
-            threshold: Deadzone threshold
-            
-        Returns:
-            float: Filtered value with deadzone applied
-        """
+        """Apply deadzone filter to controller input."""
         if abs(value) < threshold:
             return 0.0
         return value
     
     def _update_positions(self, axes: Dict[str, float], buttons: Dict[str, int]):
-        """Update robot positions based on controller input.
-        
-        This is adapted from the PS4 controller _update_positions method.
-        
-        Args:
-            axes: Dictionary of analog stick and trigger values
-            buttons: Dictionary of button states
-        """
+        """Update robot positions based on controller input."""
         temp_positions = self.current_positions.copy()
+        temp_x, temp_y = self.x, self.y
         
         # Handle macro buttons first
         used_macros = False
@@ -282,167 +194,114 @@ class XboxController:
                 break
         
         if not used_macros:
-            # Manual control mode - Original PS4 control pattern
-            
-            # === RIGHT STICK: WRIST CONTROL ===
-            # Right stick controls wrist_roll (X) and wrist_flex (Y) - ORIGINAL PATTERN
+            # Manual control
             temp_positions["wrist_roll"] += axes["RX"] * self.config.wrist_roll_speed
-            temp_positions["wrist_flex"] -= axes["RY"] * self.config.wrist_flex_speed  # Inverted for intuitive control
+            temp_positions["wrist_flex"] -= axes["RY"] * self.config.wrist_flex_speed
             
-            # === TRIGGERS: GRIPPER ===
-            temp_positions["gripper"] -= self.config.gripper_speed * axes["RT"]  # Right trigger closes
-            temp_positions["gripper"] += self.config.gripper_speed * axes["LT"]  # Left trigger opens
+            temp_positions["gripper"] -= self.config.gripper_speed * axes["RT"]
+            temp_positions["gripper"] += self.config.gripper_speed * axes["LT"]
             
-            # === LEFT STICK X + D-PAD LEFT/RIGHT: SHOULDER PAN ===
-            # Left stick X and D-pad left/right control shoulder_pan - ORIGINAL PATTERN
             temp_positions["shoulder_pan"] += (
                 axes["LX"] - buttons["DPAD_LEFT"] + buttons["DPAD_RIGHT"]
             ) * self.config.shoulder_pan_speed
             
-            # === LEFT STICK Y: FORWARD/BACKWARD (X coordinate) ===
-            # Left stick Y changes X coordinate - ORIGINAL PATTERN
-            temp_x = self.x + axes["LY"] * self.config.x_axis_speed  # mm per update
-            
-            # === D-PAD UP/DOWN: UP/DOWN MOVEMENT (Y coordinate) ===
-            # D-pad up/down changes Y coordinate - ORIGINAL PATTERN
+            temp_x = self.x + axes["LY"] * self.config.x_axis_speed
             temp_y = self.y + (buttons["DPAD_UP"] - buttons["DPAD_DOWN"]) * self.config.y_axis_speed
             
-            # Compute shoulder_lift and elbow_flex angles using inverse kinematics
+            # Compute shoulder_lift and elbow_flex using inverse kinematics
             try:
                 temp_positions["shoulder_lift"], temp_positions["elbow_flex"] = (
                     self._compute_inverse_kinematics(temp_x, temp_y)
                 )
                 
-                # Adjust wrist_flex to maintain end-effector orientation
+                # Adjust wrist_flex to maintain orientation
                 shoulder_lift_change = temp_positions["shoulder_lift"] - self.current_positions["shoulder_lift"]
                 elbow_flex_change = temp_positions["elbow_flex"] - self.current_positions["elbow_flex"]
                 temp_positions["wrist_flex"] += shoulder_lift_change - elbow_flex_change
                 
-                correct_ik = True
-                
-            except ValueError as e:
-                logging.error(f"Inverse kinematics error: {e}")
-                temp_x = self.x  # Revert to current position
+            except ValueError:
+                temp_x = self.x
                 temp_y = self.y
-                correct_ik = False
         else:
-            # Macro was used, compute X/Y from the macro position
             temp_x, temp_y = self._compute_position(
                 temp_positions["shoulder_lift"], temp_positions["elbow_flex"]
             )
-            correct_ik = True
         
-        # Validate positions individually and only discard invalid ones
-        any_invalid = False
+        # Validate and apply positions selectively
+        self._apply_valid_positions(temp_positions, temp_x, temp_y)
+    
+    def _apply_valid_positions(self, temp_positions: Dict[str, float], temp_x: float, temp_y: float):
+        """Apply only valid position changes, keeping current values for invalid ones."""
+        updated_positions = self.current_positions.copy()
+        any_limits_hit = False
         
         # Check each motor position individually
-        for motor, (min_val, max_val) in self.config.position_limits.items():
-            if motor in temp_positions:
-                if not (min_val <= temp_positions[motor] <= max_val):
-                    logging.warning(f"Motor '{motor}' position {temp_positions[motor]:.1f} out of range [{min_val}, {max_val}] - reverting this motor only")
-                    temp_positions[motor] = self.current_positions[motor]  # Revert only this motor
-                    any_invalid = True
+        for motor in temp_positions:
+            if motor in self.config.position_limits:
+                min_val, max_val = self.config.position_limits[motor]
+                if min_val <= temp_positions[motor] <= max_val:
+                    updated_positions[motor] = temp_positions[motor]
+                else:
+                    # Keep current position for this motor
+                    any_limits_hit = True
+            else:
+                # No limits defined for this motor, apply change
+                updated_positions[motor] = temp_positions[motor]
         
-        # Check end-effector position limits
-        x_limits = self.config.position_limits["x"]
-        y_limits = self.config.position_limits["y"]
+        # Check workspace limits for x,y coordinates
+        x_limits = self.config.position_limits.get("x", (-float('inf'), float('inf')))
+        y_limits = self.config.position_limits.get("y", (-float('inf'), float('inf')))
         
-        if not (x_limits[0] <= temp_x <= x_limits[1]):
-            logging.warning(f"X position {temp_x:.1f} out of range {x_limits} - reverting X movement")
-            temp_x = self.x  # Revert X position
-            any_invalid = True
-            
-        if not (y_limits[0] <= temp_y <= y_limits[1]):
-            logging.warning(f"Y position {temp_y:.1f} out of range {y_limits} - reverting Y movement")
-            temp_y = self.y  # Revert Y position
-            any_invalid = True
+        temp_x_valid = x_limits[0] <= temp_x <= x_limits[1]
+        temp_y_valid = y_limits[0] <= temp_y <= y_limits[1]
         
-        # If X or Y was invalid, recompute shoulder_lift and elbow_flex
-        if any_invalid and correct_ik:
-            try:
-                temp_positions["shoulder_lift"], temp_positions["elbow_flex"] = (
-                    self._compute_inverse_kinematics(temp_x, temp_y)
-                )
-                # Recompute wrist_flex adjustment
-                shoulder_lift_change = temp_positions["shoulder_lift"] - self.current_positions["shoulder_lift"]
-                elbow_flex_change = temp_positions["elbow_flex"] - self.current_positions["elbow_flex"]
-                temp_positions["wrist_flex"] += shoulder_lift_change - elbow_flex_change
-                
-                correct_ik = True
-                
-            except ValueError as e:
-                logging.error(f"Inverse kinematics error: {e}")
-                temp_x = self.x  # Revert to current position
-                temp_y = self.y
-                correct_ik = False
+        # If x,y are valid, use the computed shoulder/elbow positions
+        # If not, recompute shoulder/elbow from current x,y to maintain position
+        if temp_x_valid and temp_y_valid:
+            self.current_positions = updated_positions
+            self.x = temp_x
+            self.y = temp_y
         else:
-            # Macro was used, compute X/Y from the macro position
-            temp_x, temp_y = self._compute_position(
-                temp_positions["shoulder_lift"], temp_positions["elbow_flex"]
-            )
-            correct_ik = True
+            # Apply non-kinematic changes (wrist_roll, wrist_flex, gripper, shoulder_pan)
+            non_kinematic_motors = ["wrist_roll", "wrist_flex", "gripper", "shoulder_pan"]
+            for motor in non_kinematic_motors:
+                if motor in updated_positions:
+                    self.current_positions[motor] = updated_positions[motor]
+            
+            # Keep current x,y and recompute shoulder_lift/elbow_flex if needed
+            if not temp_x_valid or not temp_y_valid:
+                any_limits_hit = True
         
-        # Apply all valid changes (some positions may have been reverted individually)
-        self.current_positions = temp_positions
-        self.x = temp_x
-        self.y = temp_y
-        
-        # Indicate error only if any limits were hit
-        if any_invalid:
+        if any_limits_hit:
             self.indicate_error()
     
     def _execute_macro(self, button: str, positions: Dict[str, float]) -> Dict[str, float]:
-        """Execute predefined macro for button press.
-        
-        Args:
-            button: Button name ("A", "B", "X", "Y")
-            positions: Current position dictionary to modify
-            
-        Returns:
-            Dict[str, float]: Updated positions dictionary
-        """
+        """Execute predefined macro for button press."""
         if button in self.config.macros:
             macro_positions = self.config.macros[button]
             for name, pos in zip(self.motor_names, macro_positions, strict=False):
                 positions[name] = pos
-            logging.info(f"Macro '{button}' executed: {macro_positions}")
         return positions
     
     def _compute_inverse_kinematics(self, x: float, y: float) -> tuple[float, float]:
-        """Compute inverse kinematics for 2-link arm.
-        
-        This is the exact implementation from the PS4 controller code.
-        
-        Args:
-            x: Target X coordinate (mm)
-            y: Target Y coordinate (mm)
-            
-        Returns:
-            tuple[float, float]: (shoulder_lift_angle, elbow_flex_angle) in degrees
-            
-        Raises:
-            ValueError: If target point is unreachable
-        """
+        """Compute inverse kinematics for 2-link arm."""
         l1 = self.l1
         l2 = self.l2
         
-        # Compute distance from motor 2 to desired point
         distance = math.hypot(x, y)
         
-        # Check if point is reachable
         if distance > (l1 + l2) or distance < abs(l1 - l2):
-            raise ValueError(f"Point ({x}, {y}) is out of reach (distance: {distance:.1f}mm)")
+            raise ValueError(f"Point ({x}, {y}) is out of reach")
         
-        # Compute angle for motor3 (elbow_flex)
+        # Compute elbow angle
         cos_theta2 = (l1**2 + l2**2 - distance**2) / (2 * l1 * l2)
         theta2_rad = math.acos(cos_theta2)
         theta2_deg = math.degrees(theta2_rad)
         
-        # Adjust motor3 angle
         offset = math.degrees(math.asin(32 / l1))
         motor3_angle = 180 - (theta2_deg - offset)
         
-        # Compute angle for motor2 (shoulder_lift)
+        # Compute shoulder angle  
         cos_theta1 = (l1**2 + distance**2 - l2**2) / (2 * l1 * distance)
         theta1_rad = math.acos(cos_theta1)
         theta1_deg = math.degrees(theta1_rad)
@@ -455,17 +314,7 @@ class XboxController:
         return motor2_angle, motor3_angle
     
     def _compute_position(self, motor2_angle: float, motor3_angle: float) -> tuple[float, float]:
-        """Compute forward kinematics for 2-link arm.
-        
-        This is the exact implementation from the PS4 controller code.
-        
-        Args:
-            motor2_angle: Shoulder lift angle (degrees)
-            motor3_angle: Elbow flex angle (degrees)
-            
-        Returns:
-            tuple[float, float]: (x, y) position in mm
-        """
+        """Compute forward kinematics for 2-link arm."""
         l1 = self.l1
         l2 = self.l2
         offset = math.degrees(math.asin(32 / l1))
@@ -482,90 +331,50 @@ class XboxController:
         return x, y
     
     def _is_position_valid(self, positions: Dict[str, float], x: float, y: float) -> bool:
-        """Validate all motor positions and end-effector coordinates.
-        
-        Args:
-            positions: Dictionary of motor positions
-            x: End-effector X coordinate 
-            y: End-effector Y coordinate
-            
-        Returns:
-            bool: True if all positions are valid
-        """
-        # Check motor position limits
+        """Validate all motor positions and end-effector coordinates."""
+        # Check motor limits
         for motor, (min_val, max_val) in self.config.position_limits.items():
             if motor in positions:
                 if not (min_val <= positions[motor] <= max_val):
-                    logging.error(f"Motor '{motor}' position {positions[motor]:.1f} out of range [{min_val}, {max_val}]")
                     return False
         
-        # Check end-effector position limits
+        # Check workspace limits
         x_limits = self.config.position_limits["x"]
         y_limits = self.config.position_limits["y"]
         
         if not (x_limits[0] <= x <= x_limits[1]):
-            logging.error(f"X position {x:.1f} out of range {x_limits}")
             return False
             
         if not (y_limits[0] <= y <= y_limits[1]):
-            logging.error(f"Y position {y:.1f} out of range {y_limits}")
             return False
         
         return True
     
     def indicate_error(self):
-        """Indicate error condition to user.
-        
-        For Xbox controller, we log the error. In future phases,
-        we could add controller vibration feedback.
-        """
-        logging.warning("Invalid move attempted - controller limits reached")
-        # TODO: Add controller vibration feedback if supported
+        """Indicate error condition to user."""
+        logging.warning("Controller limits reached")
     
     def get_command(self) -> Dict[str, float]:
-        """Get current motor position commands.
-        
-        Returns:
-            Dict[str, float]: Current motor positions
-        """
+        """Get current motor position commands."""
         return self.current_positions.copy()
     
     def stop(self):
         """Stop controller and clean up resources."""
         self.disconnect()
         pygame.quit()
-        logging.info("Xbox controller stopped")
 
 
 class XboxArmController(XboxController):
-    """Extended Xbox controller specifically for arm control.
-    
-    This class extends the base XboxController with additional
-    arm-specific functionality and will be used in later phases
-    for integration with the LeRobot system.
-    """
+    """Extended Xbox controller for arm control."""
     
     def __init__(self, config: XboxControllerConfig):
-        """Initialize Xbox arm controller.
-        
-        Args:
-            config: XboxControllerConfig with arm-specific settings
-        """
+        """Initialize Xbox arm controller."""
         super().__init__(config)
-        logging.info("Xbox arm controller initialized")
     
     def get_current_end_effector_position(self) -> tuple[float, float]:
-        """Get current end-effector position.
-        
-        Returns:
-            tuple[float, float]: Current (x, y) position in mm
-        """
+        """Get current end-effector position."""
         return self.x, self.y
     
     def get_motor_positions(self) -> Dict[str, float]:
-        """Get current motor positions.
-        
-        Returns:
-            Dict[str, float]: Motor name to position mapping
-        """
+        """Get current motor positions."""
         return self.get_command() 
