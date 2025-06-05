@@ -443,7 +443,7 @@ class So101RobotConfig(ManipulatorRobotConfig):
     leader_arms: dict[str, MotorsBusConfig] = field(
         default_factory=lambda: {
             "main": FeetechMotorsBusConfig(
-                port="COM8hats ",
+                port="COM8 ",
                 motors={
                     # name: (index, model)
                     "shoulder_pan": [1, "sts3215"],
