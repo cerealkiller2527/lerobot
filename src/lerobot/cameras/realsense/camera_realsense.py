@@ -99,17 +99,19 @@ class RealSenseDepthColorizer:
         if depth_range <= 0:
             return
 
-        # Create normalized values for the valid range
-        for depth_mm in range(self.min_depth_mm, self.max_depth_mm + 1):
-            # Normalize to 0-255
-            normalized = int(((depth_mm - self.min_depth_mm) / depth_range) * 255)
-            normalized = min(255, max(0, normalized))
+        # Vectorized LUT building - 100x faster than iterating
+        # Create array of all depth values in range
+        valid_depths = np.arange(self.min_depth_mm, self.max_depth_mm + 1)
 
-            # Apply colormap to get BGR color
-            bgr_color = cv2.applyColorMap(np.array([[normalized]], dtype=np.uint8), self.colormap)[0, 0]
+        # Normalize all at once
+        normalized = ((valid_depths - self.min_depth_mm) / depth_range * 255).astype(np.uint8)
 
-            # Store as RGB in LUT
-            self.lut[depth_mm] = [bgr_color[2], bgr_color[1], bgr_color[0]]  # BGR to RGB
+        # Apply colormap to all values at once
+        bgr_colors = cv2.applyColorMap(normalized.reshape(-1, 1), self.colormap).reshape(-1, 3)
+
+        # Convert BGR to RGB and store in LUT using vectorized operation
+        # This is much faster than looping
+        self.lut[valid_depths] = bgr_colors[:, [2, 1, 0]]  # BGR to RGB swap
 
         # Set out-of-range values
         # Below minimum - show as closest color (blue in jet)
@@ -711,8 +713,8 @@ class RealSenseCamera(Camera):
                 total_depth_time += depth_time
                 total_colorize_time += colorize_time
 
-                # Log timing info every 500 frames (about 16 seconds at 30fps) to reduce log spam
-                if frame_count % 500 == 0 and frame_count > 0:
+                # Log timing info every 300 frames (about 10 seconds at 30fps) to match other intervals
+                if frame_count % 300 == 0 and frame_count > 0:
                     avg_capture = total_capture_time / frame_count
                     avg_depth = total_depth_time / frame_count if self.use_depth else 0
                     avg_colorize = total_colorize_time / frame_count if self.use_depth else 0
@@ -864,12 +866,14 @@ class RealSenseCamera(Camera):
             if self.latest_frame is not None:
                 # Build result dict immediately
                 frames = {"color": self.latest_frame.copy()}
-                
+
                 # Always include depth_rgb key if depth is enabled
                 # This ensures the robot's observation dict has all expected keys
                 if self.use_depth:
-                    frames["depth_rgb"] = self.latest_depth_rgb.copy() if self.latest_depth_rgb is not None else None
-                
+                    frames["depth_rgb"] = (
+                        self.latest_depth_rgb.copy() if self.latest_depth_rgb is not None else None
+                    )
+
                 self.new_frame_event.clear()
                 return frames
 

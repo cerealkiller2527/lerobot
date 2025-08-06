@@ -234,7 +234,7 @@ def record_loop(
     # Lightweight stats tracking - compound average
     all_frame_times = []
     last_stats_time = time.perf_counter()
-    stats_interval = 5.0  # Print stats every 5 seconds
+    stats_interval = 10.0  # Print stats every 10 seconds
     stats_printed = False
 
     timestamp = 0
@@ -304,14 +304,14 @@ def record_loop(
         if loop_end_t - last_stats_time >= stats_interval and len(all_frame_times) > 0:
             fps_array = np.array(all_frame_times)  # All frames for compound average
             recent_fps = (
-                np.array(all_frame_times[-150:]) if len(all_frame_times) > 150 else fps_array
-            )  # Last 5s
+                np.array(all_frame_times[-300:]) if len(all_frame_times) > 300 else fps_array
+            )  # Last 10s at 30fps
 
             # Move to top, print stats, then return to position
             if stats_printed:
                 move_cursor_up(len(sent_action) + 7)
             print(
-                f"\r📊 FPS Stats (5s): avg={recent_fps.mean():.1f} | min={recent_fps.min():.1f} | "
+                f"\r📊 FPS Stats (10s): avg={recent_fps.mean():.1f} | min={recent_fps.min():.1f} | "
                 f"max={recent_fps.max():.1f} | std={recent_fps.std():.1f} | Total avg={fps_array.mean():.1f}"
             )
             print("" + " " * 80)  # Clear line for clean display
