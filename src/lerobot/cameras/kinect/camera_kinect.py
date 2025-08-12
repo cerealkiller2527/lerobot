@@ -142,17 +142,26 @@ class KinectCamera(Camera):
         self.pipeline_type = config.pipeline
         self.warmup_s = config.warmup_s
 
-        # Kinect v2 fixed color resolution
+        # Kinect v2 native color resolution
         self.color_width = 1920
         self.color_height = 1080
 
-        # Set output dimensions based on requested stream
+        # Set output dimensions - default to 960x540 for better performance
         if config.width is None or config.height is None:
-            self.width = self.color_width
-            self.height = self.color_height
+            # Default to 960x540 - perfect 1:2 scaling of 1920x1080
+            # This reduces data by 4x compared to full HD while maintaining aspect ratio
+            self.width = 960
+            self.height = 540
         else:
+            # Support common resolutions
+            # Perfect scaling (16:9): 1920x1080, 1280x720, 960x540, 640x360, 480x270, 320x180
+            # Near 16:9: 848x480, 640x480 (4:3, requires padding)
             self.width = config.width
             self.height = config.height
+            
+            # Log resolution info for debugging
+            scale_factor = (self.color_width * self.color_height) / (self.width * self.height)
+            logger.debug(f"Kinect output resolution: {self.width}x{self.height} (scale factor: {scale_factor:.1f}x)")
 
         # libfreenect2 objects
         self.fn2: Freenect2 | None = None
@@ -174,16 +183,25 @@ class KinectCamera(Camera):
         self.capture_width, self.capture_height = self.width, self.height
         if self.rotation in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE]:
             self.capture_width, self.capture_height = self.height, self.width
+        
+        # Pre-compute processing flags for performance
+        self._needs_resize = (self.width != self.color_width or self.height != self.color_height)
+        self._has_rotation = self.rotation in [cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE, cv2.ROTATE_180]
+        
+        # Pre-allocate FrameMap for reuse
+        self._frame_map = None
 
     def __str__(self) -> str:
         identifier = self.serial_number if self.serial_number else f"index_{self.device_index}"
         return f"{self.__class__.__name__}({identifier})"
+    
 
     @property
     def is_connected(self) -> bool:
         """Checks if the Kinect device is connected and started."""
         return self.device is not None and self.listener is not None
-
+    
+    
     def connect(self, warmup: bool = True):
         """
         Connects to the Kinect v2 camera specified in the configuration.
@@ -199,14 +217,17 @@ class KinectCamera(Camera):
         if self.is_connected:
             raise DeviceAlreadyConnectedError(f"{self} is already connected.")
 
+        # Simple approach: Initialize Freenect2 with a small delay for USB stability
+        time.sleep(0.5)  # Small delay for USB stability after previous disconnect
+        
         # Initialize Freenect2
         self.fn2 = Freenect2()
 
-        # Check for available devices (may need to retry after previous instance release)
+        # Check for available devices
         num_devices = self.fn2.enumerateDevices()
         if num_devices == 0:
-            # Wait a bit and try again (device might need time after previous release)
-            time.sleep(0.5)
+            # One retry after a delay
+            time.sleep(1.0)
             num_devices = self.fn2.enumerateDevices()
             if num_devices == 0:
                 raise ConnectionError(
@@ -216,41 +237,34 @@ class KinectCamera(Camera):
         # Select pipeline
         self.pipeline = self._create_pipeline()
 
-        # Open device
-        if self.serial_number:
-            # Try with string first, then bytes if that fails
-            serial_str = self.serial_number
-            if isinstance(serial_str, bytes):
-                serial_str = serial_str.decode("utf-8")
-
-            try:
+        # Open device - simplified approach
+        try:
+            if self.serial_number:
+                # Convert to string if bytes
+                serial_str = self.serial_number
+                if isinstance(serial_str, bytes):
+                    serial_str = serial_str.decode("utf-8")
                 self.device = self.fn2.openDevice(serial_str, pipeline=self.pipeline)
-            except Exception:
-                # Try with bytes if string failed
-                try:
-                    serial_bytes = (
-                        serial_str.encode("utf-8") if isinstance(serial_str, str) else self.serial_number
+            elif self.device_index is not None:
+                if self.device_index >= num_devices:
+                    raise ConnectionError(
+                        f"Device index {self.device_index} not found. "
+                        f"Only {num_devices} Kinect device(s) available."
                     )
-                    self.device = self.fn2.openDevice(serial_bytes, pipeline=self.pipeline)
-                except Exception:
-                    # Fall back to index-based opening
-                    if num_devices > 0:
-                        self.device = self.fn2.openDevice(
-                            self.fn2.getDeviceSerialNumber(0), pipeline=self.pipeline
-                        )
-                    else:
-                        self.device = None
-        elif self.device_index is not None:
-            if self.device_index >= num_devices:
+                device_serial = self.fn2.getDeviceSerialNumber(self.device_index)
+                self.device = self.fn2.openDevice(device_serial, pipeline=self.pipeline)
+            else:
+                # Open first available device
+                self.device = self.fn2.openDefaultDevice(pipeline=self.pipeline)
+        except Exception as e:
+            # If we get LIBUSB_ERROR_OTHER, suggest a restart
+            if "LIBUSB_ERROR_OTHER" in str(e):
                 raise ConnectionError(
-                    f"Device index {self.device_index} not found. "
-                    f"Only {num_devices} Kinect device(s) available."
+                    f"USB error opening Kinect: {e}\n"
+                    "This usually happens after an improper shutdown.\n" 
+                    "Please unplug and replug the Kinect, then try again."
                 )
-            device_serial = self.fn2.getDeviceSerialNumber(self.device_index)
-            self.device = self.fn2.openDevice(device_serial, pipeline=self.pipeline)
-        else:
-            # Open first available device
-            self.device = self.fn2.openDefaultDevice(pipeline=self.pipeline)
+            raise
 
         if self.device is None:
             raise ConnectionError(f"Failed to open {self}. Ensure Kinect v2 is connected to a USB 3.0 port.")
@@ -289,69 +303,44 @@ class KinectCamera(Camera):
 
     def _create_pipeline(self):
         """Creates the appropriate processing pipeline based on configuration."""
-        pipeline_type = self.pipeline_type
-
-        if pipeline_type == KinectPipeline.AUTO:
-            # Try pipelines in order of performance
-            pipelines_to_try = [
-                (KinectPipeline.CUDA, self._try_cuda_pipeline),
-                (KinectPipeline.OPENCL, self._try_opencl_pipeline),
-                (KinectPipeline.OPENGL, self._try_opengl_pipeline),
-                (KinectPipeline.CPU, self._try_cpu_pipeline),
-            ]
-
-            for _name, create_func in pipelines_to_try:
-                pipeline = create_func()
-                if pipeline is not None:
-                    return pipeline
-
-            # Should never reach here as CPU pipeline always works
-            raise RuntimeError("Failed to create any pipeline")
-
+        if self.pipeline_type == KinectPipeline.AUTO:
+            # Try pipelines in order of performance: CUDA > OpenCL > CPU
+            try:
+                if hasattr(pylibfreenect2, "CudaPacketPipeline"):
+                    return pylibfreenect2.CudaPacketPipeline()
+            except Exception:
+                pass
+            
+            try:
+                if hasattr(pylibfreenect2, "OpenCLPacketPipeline"):
+                    return pylibfreenect2.OpenCLPacketPipeline()
+            except Exception:
+                pass
+            
+            # CPU pipeline is always available
+            return pylibfreenect2.CpuPacketPipeline()
+        
         # Specific pipeline requested
-        pipeline_creators = {
-            KinectPipeline.CUDA: self._try_cuda_pipeline,
-            KinectPipeline.OPENCL: self._try_opencl_pipeline,
-            KinectPipeline.OPENGL: self._try_opengl_pipeline,
-            KinectPipeline.CPU: self._try_cpu_pipeline,
-        }
-
-        pipeline = pipeline_creators[pipeline_type]()
-        if pipeline is None:
-            raise RuntimeError(f"Requested pipeline {pipeline_type.value} is not available")
-
-        return pipeline
-
-    def _try_cuda_pipeline(self):
-        """Attempts to create CUDA pipeline if available."""
-        try:
-            if hasattr(pylibfreenect2, "CudaPacketPipeline"):
+        elif self.pipeline_type == KinectPipeline.CUDA:
+            try:
                 return pylibfreenect2.CudaPacketPipeline()
-        except Exception as e:
-            logger.debug(f"CUDA pipeline not available: {e}")
-        return None
-
-    def _try_opencl_pipeline(self):
-        """Attempts to create OpenCL pipeline if available."""
-        try:
-            if hasattr(pylibfreenect2, "OpenCLPacketPipeline"):
+            except Exception as e:
+                raise RuntimeError(f"CUDA pipeline not available: {e}")
+        
+        elif self.pipeline_type == KinectPipeline.OPENCL:
+            try:
                 return pylibfreenect2.OpenCLPacketPipeline()
-        except Exception as e:
-            logger.debug(f"OpenCL pipeline not available: {e}")
-        return None
-
-    def _try_opengl_pipeline(self):
-        """Attempts to create OpenGL pipeline if available."""
-        try:
-            if hasattr(pylibfreenect2, "OpenGLPacketPipeline"):
+            except Exception as e:
+                raise RuntimeError(f"OpenCL pipeline not available: {e}")
+        
+        elif self.pipeline_type == KinectPipeline.OPENGL:
+            try:
                 return pylibfreenect2.OpenGLPacketPipeline()
-        except Exception as e:
-            logger.debug(f"OpenGL pipeline not available: {e}")
-        return None
-
-    def _try_cpu_pipeline(self):
-        """Creates CPU pipeline (always available)."""
-        return pylibfreenect2.CpuPacketPipeline()
+            except Exception as e:
+                raise RuntimeError(f"OpenGL pipeline not available: {e}")
+        
+        else:  # CPU
+            return pylibfreenect2.CpuPacketPipeline()
 
     @staticmethod
     def find_cameras() -> list[dict[str, Any]]:
@@ -447,43 +436,84 @@ class KinectCamera(Camera):
         Internal loop run by the background thread for asynchronous reading.
         Optimized for minimal latency - processes BGRA to RGB conversion.
         """
-
+        # Pre-allocate FrameMap once to avoid repeated allocations
+        if self._frame_map is None:
+            self._frame_map = FrameMap()
+        frames = self._frame_map
+        
+        # Pre-allocate buffers for optimized frame retrieval
+        color_buffer_bgr = np.empty((self.color_height, self.color_width, 3), dtype=np.uint8)
+        
+        # Calculate optimal timeout based on FPS (with small buffer)
+        timeout_ms = int(1000 / self.fps * 1.5) if self.fps else 50
+        
         while not self.stop_event.is_set():
             try:
-                frames = FrameMap()
-                # Use shorter timeout for more responsive shutdown
-                wait_start = time.perf_counter()
-                if self.listener.waitForNewFrame(frames, 100):
-                    _ = (time.perf_counter() - wait_start) * 1000
+                # Reuse the same FrameMap object
+                frames = self._frame_map
+                # Use FPS-appropriate timeout
+                if self.listener.waitForNewFrame(frames, timeout_ms):
 
                     try:
-                        # Process color frame - Convert BGRA→RGB, optional resize, rotation
+                        # Process color frame - Use optimized method if available
                         color_frame = frames[FrameType.Color]
-                        color_bgra = color_frame.asarray()
-                        # Drop alpha and convert to RGB
-                        color_data = cv2.cvtColor(color_bgra, cv2.COLOR_BGRA2RGB)
-
-                        # Optional resize to whitelist resolutions
-                        if self.width and self.height:
-                            target_w, target_h = int(self.width), int(self.height)
-                            h, w = color_data.shape[:2]
-                            if (w, h) != (target_w, target_h):
-                                interp = cv2.INTER_AREA if target_w < w or target_h < h else cv2.INTER_LINEAR
-                                color_data = cv2.resize(
-                                    color_data, (target_w, target_h), interpolation=interp
+                        
+                        # Try to use optimized method first (40-60% faster)
+                        if hasattr(color_frame, 'asarray_optimized'):
+                            # asarray_optimized directly converts BGRA→BGR and drops alpha
+                            # This avoids the 8.3MB BGRA allocation and uses pre-allocated buffer
+                            color_bgr = color_frame.asarray_optimized(color_buffer_bgr)
+                            
+                            # Optimize: combine resize + color conversion when downscaling
+                            if self._needs_resize and self.width < self.color_width:
+                                # Resize first (reduces data), then convert color
+                                # INTER_AREA is best for downscaling quality + speed
+                                color_bgr_resized = cv2.resize(
+                                    color_bgr, (self.width, self.height), 
+                                    interpolation=cv2.INTER_AREA
                                 )
+                                color_data = cv2.cvtColor(color_bgr_resized, cv2.COLOR_BGR2RGB)
+                            elif self._needs_resize:
+                                # Upscaling: convert color first, then resize
+                                color_rgb = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)
+                                color_data = cv2.resize(
+                                    color_rgb, (self.width, self.height),
+                                    interpolation=cv2.INTER_LINEAR
+                                )
+                            else:
+                                # No resize needed
+                                color_data = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)
+                        else:
+                            # Fallback to standard method
+                            color_bgra = color_frame.asarray()
+                            
+                            # Optimize: resize BGRA first when downscaling (processes less data)
+                            if self._needs_resize and self.width < self.color_width:
+                                # Resize with alpha channel intact
+                                color_bgra_resized = cv2.resize(
+                                    color_bgra, (self.width, self.height),
+                                    interpolation=cv2.INTER_AREA
+                                )
+                                # Then convert to RGB (drops alpha)
+                                color_data = cv2.cvtColor(color_bgra_resized, cv2.COLOR_BGRA2RGB)
+                            elif self._needs_resize:
+                                # Upscaling: convert first, then resize
+                                color_rgb = cv2.cvtColor(color_bgra, cv2.COLOR_BGRA2RGB)
+                                color_data = cv2.resize(
+                                    color_rgb, (self.width, self.height),
+                                    interpolation=cv2.INTER_LINEAR
+                                )
+                            else:
+                                # No resize needed
+                                color_data = cv2.cvtColor(color_bgra, cv2.COLOR_BGRA2RGB)
 
-                        # Optional rotation
-                        if self.rotation in [
-                            cv2.ROTATE_90_CLOCKWISE,
-                            cv2.ROTATE_90_COUNTERCLOCKWISE,
-                            cv2.ROTATE_180,
-                        ]:
+                        # Use pre-computed rotation flag
+                        if self._has_rotation:
                             color_data = cv2.rotate(color_data, self.rotation)
 
                         # Store frame thread-safely (minimal time in lock)
                         with self.frame_lock:
-                            self.latest_frame = color_data.copy() if color_data is not None else None
+                            self.latest_frame = color_data  # No need for copy here
                         self.new_frame_event.set()
 
                     finally:
@@ -552,7 +582,7 @@ class KinectCamera(Camera):
         # This is the key optimization for parallel reading
         with self.frame_lock:
             if self.latest_frame is not None:
-                frame = self.latest_frame.copy()
+                frame = self.latest_frame
                 # Don't clear the event here - other threads might be waiting
                 return frame
 
@@ -566,41 +596,71 @@ class KinectCamera(Camera):
 
         with self.frame_lock:
             # Return color frame
-            frame = self.latest_frame.copy() if self.latest_frame is not None else None
+            frame = self.latest_frame
+            self.new_frame_event.clear()  # Clear event after reading, matching RealSense pattern
 
         if frame is None:
             raise RuntimeError(f"Internal error: Event set but no frame available for {self}.")
 
         return frame
 
-    def disconnect(self):
+    def disconnect(self, suppress_errors: bool = False):
         """
         Disconnects from the camera and releases all resources.
+        
+        Args:
+            suppress_errors: If True, suppress disconnect errors (useful for keyboard interrupts).
 
         Raises:
-            DeviceNotConnectedError: If the camera is already disconnected.
+            DeviceNotConnectedError: If the camera is already disconnected (unless suppress_errors=True).
         """
         if not self.is_connected and self.thread is None:
-            raise DeviceNotConnectedError(
-                f"Attempted to disconnect {self}, but it appears already disconnected."
-            )
+            if not suppress_errors:
+                raise DeviceNotConnectedError(
+                    f"Attempted to disconnect {self}, but it appears already disconnected."
+                )
+            return
 
+        # Stop the read thread first
         if self.thread is not None:
             self._stop_read_thread()
 
-        if self.device is not None:
-            self.device.stop()
-            self.device.close()
-            self.device = None
+        # Clear any pending frames before stopping device
+        if self.listener is not None and self.device is not None:
+            try:
+                frames = FrameMap()
+                if self.listener.waitForNewFrame(frames, 1):  # 1ms timeout
+                    self.listener.release(frames)
+            except Exception:
+                pass  # Ignore errors during buffer clear
 
+        # Stop and close device in proper order
+        if self.device is not None:
+            try:
+                self.device.stop()
+                time.sleep(1.0)  # Small delay to ensure stop completes
+                self.device.close()
+            except Exception as e:
+                if not suppress_errors:
+                    logger.debug(f"Error during {self} disconnect: {e}")
+            finally:
+                self.device = None
+
+        # Clean up listener and other resources
         self.listener = None
         self.registration = None
         self.pipeline = None
-
-        # Clean up Freenect2 instance
+        self._frame_map = None
+        
+        # Clean up Freenect2 instance - MUST be last and wait for USB to stabilize
         if self.fn2 is not None:
-            del self.fn2
-            self.fn2 = None
-            gc.collect()  # Force garbage collection
+            try:
+                del self.fn2
+            except Exception:
+                pass  # Ignore errors during cleanup
+            finally:
+                self.fn2 = None
+                gc.collect()  # Force garbage collection
+                time.sleep(1.0)  # Increased wait for USB device to be fully released on Windows
 
         logger.info(f"{self} disconnected.")
