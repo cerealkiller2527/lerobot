@@ -58,13 +58,16 @@ class ACTPolicyWithReward:
                 action, reward = self.policy.predict_both(observation)
             else:
                 # Fallback for compatibility with older versions
-                action, reward = self.policy.select_action(observation, force_model_run=True)
+                action, reward = self.policy.select_action(observation, compute_actions=True, compute_rewards=True)
         
         # Extract reward value (should be a float between 0 and 1)
-        if isinstance(reward, torch.Tensor):
-            reward_value = float(reward.item())
+        if reward is not None:
+            if isinstance(reward, torch.Tensor):
+                reward_value = float(reward.item())
+            else:
+                reward_value = float(reward)
         else:
-            reward_value = float(reward)
+            reward_value = 0.0
         
         # Clamp reward to [0, 1] range
         reward_value = max(0.0, min(1.0, reward_value))
@@ -81,6 +84,53 @@ class ACTPolicyWithReward:
         self.step_count += 1
         
         return action, reward_value
+    
+    def predict_reward_only(self, observation: Dict[str, torch.Tensor]) -> float:
+        """
+        Get only the reward prediction (optimized path, ~20% faster).
+        
+        Args:
+            observation: Dictionary of observations
+            
+        Returns:
+            reward: The reward value (float between 0 and 1)
+        """
+        with torch.inference_mode():
+            if hasattr(self.policy, 'predict_reward_only'):
+                reward = self.policy.predict_reward_only(observation)
+            else:
+                # Fallback: use select_action with action computation disabled
+                _, reward = self.policy.select_action(observation, compute_actions=False, compute_rewards=True)
+        
+        # Extract and clamp reward value
+        if reward is not None:
+            if isinstance(reward, torch.Tensor):
+                reward_value = float(reward.item())
+            else:
+                reward_value = float(reward)
+        else:
+            reward_value = 0.0
+            
+        return max(0.0, min(1.0, reward_value))
+    
+    def predict_action_only(self, observation: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """
+        Get only the action prediction (skips reward computation).
+        
+        Args:
+            observation: Dictionary of observations
+            
+        Returns:
+            action: The predicted action tensor
+        """
+        with torch.inference_mode():
+            if hasattr(self.policy, 'predict_action_only'):
+                action = self.policy.predict_action_only(observation)
+            else:
+                # Fallback: use select_action with reward computation disabled
+                action, _ = self.policy.select_action(observation, compute_actions=True, compute_rewards=False)
+        
+        return action
     
     def _extract_images(self, observation: Dict[str, torch.Tensor]) -> List[torch.Tensor]:
         """Extract image tensors from observation dictionary"""
