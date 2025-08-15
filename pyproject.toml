@@ -112,7 +112,7 @@ intelrealsense = [
     "pyrealsense2-macosx>=2.54 ; sys_platform == 'darwin'",
 ]
 kinect = [
-    "pylibfreenect2 @ git+https://github.com/cerealkiller2527/pylibfreenect2-py310.git ; python_version >= '3.10'"
+    "pylibfreenect2-py310 @ git+https://github.com/cerealkiller2527/pylibfreenect2-py310.git ; python_version >= '3.10'"
 ]
 # stretch = [
 #     "hello-robot-stretch-body>=0.7.27 ; sys_platform == 'linux'",
